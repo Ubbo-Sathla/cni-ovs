@@ -21,26 +21,7 @@ spec:
     spec:
       containers:
           command:
-            - bash
-          env:
-            - name: KUBE_NODE_NAME
-              valueFrom:
-                fieldRef:
-                  apiVersion: v1
-                  fieldPath: spec.nodeName
-            - name: MODULES
-              value: kube_ovn_fastpath.ko
-            - name: RPMS
-              value: openvswitch-kmod
-            - name: POD_IPS
-              valueFrom:
-                fieldRef:
-                  apiVersion: v1
-                  fieldPath: status.podIPs
-            - name: ENABLE_BIND_LOCAL_IP
-              value: "true"
-            - name: DBUS_SYSTEM_BUS_ADDRESS
-              value: unix:path=/host/var/run/dbus/system_bus_socket
+            - ["/kube-ovn/kube-ovs"]
           image: kubeovn/kube-ovn:v1.11.5
           imagePullPolicy: IfNotPresent
           resources:
@@ -91,7 +72,10 @@ spec:
       hostPID: true
       initContainers:
         - command:
-            - /kube-ovn/install-cni.sh
+            - /usr/bin/cp
+            - -f
+            - /kube-ovn/cni-ovs
+            - /opt/cni/bin/
           image: kubeovn/kube-ovn:v1.11.5
           imagePullPolicy: IfNotPresent
           name: install-cni
