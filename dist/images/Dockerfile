@@ -1,2 +1,4 @@
-FROM golang:1.26-alpine3.18
+FROM kubeovn/kube-ovn:v1.11.5
 
+ADD kube-ovs /usr/local/bin/
+ADD cni-ovs /kube-ovn/
