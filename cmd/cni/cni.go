@@ -22,7 +22,7 @@ import (
 	"github.com/Ubbo-Sathla/cni-ovs/pkg/request"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
-	current "github.com/containernetworking/cni/pkg/types/100"
+	cni100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/pkg/ipam"
@@ -37,10 +37,11 @@ import (
 
 type NetConf struct {
 	types.NetConf
-	Master string `json:"master"`
-	Mode   string `json:"mode"`
-	MTU    int    `json:"mtu"`
-	Mac    string `json:"mac,omitempty"`
+	Master       string `json:"master"`
+	ServerSocket string `json:"server_socket"`
+	Mode         string `json:"mode"`
+	MTU          int    `json:"mtu"`
+	Mac          string `json:"mac,omitempty"`
 
 	RuntimeConfig struct {
 		Mac string `json:"mac,omitempty"`
@@ -164,8 +165,8 @@ func modeToString(mode netlink.MacvlanMode) (string, error) {
 	}
 }
 
-func createMacvlan(conf *NetConf, ifName string, netns ns.NetNS) (*current.Interface, error) {
-	macvlan := &current.Interface{}
+func createMacvlan(conf *NetConf, ifName string, netns ns.NetNS) (*cni100.Interface, error) {
+	macvlan := &cni100.Interface{}
 
 	mode, err := modeFromString(conf.Mode)
 	if err != nil {
@@ -262,9 +263,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}()
 
 	// Assume L2 interface only
-	result := &current.Result{
-		CNIVersion: current.ImplementedSpecVersion,
-		Interfaces: []*current.Interface{macvlanInterface},
+	result := &cni100.Result{
+		CNIVersion: cni100.ImplementedSpecVersion,
+		Interfaces: []*cni100.Interface{macvlanInterface},
 	}
 
 	if isLayer3 {
@@ -281,7 +282,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}()
 
 		// Convert whatever the IPAM result was into the current Result type
-		ipamResult, err := current.NewResultFromResult(r)
+		ipamResult, err := cni100.NewResultFromResult(r)
 		if err != nil {
 			return err
 		}
@@ -293,11 +294,30 @@ func cmdAdd(args *skel.CmdArgs) error {
 		result.IPs = ipamResult.IPs
 		result.Routes = ipamResult.Routes
 		klog.Info("cmdAdd: result ", result)
-		client := request.NewCniServerClient(netConf.ServerSocket)
+		client := request.NewCniServerClient(n.ServerSocket)
+		_, err = client.Add(request.CniRequest{
+			CniType:                   n.Type,
+			IpamResult:                *ipamResult,
+			PodName:                   "",
+			PodNamespace:              "",
+			ContainerID:               args.ContainerID,
+			NetNs:                     args.Netns,
+			IfName:                    args.IfName,
+			Provider:                  "",
+			Routes:                    nil,
+			DNS:                       types.DNS{},
+			VfDriver:                  "",
+			DeviceID:                  "",
+			VhostUserSocketVolumeName: "",
+			VhostUserSocketName:       "",
+		})
+		if err != nil {
+			return types.NewError(types.ErrTryAgainLater, "RPC failed", err.Error())
+		}
 
 		for _, ipc := range result.IPs {
 			// All addresses apply to the container macvlan interface
-			ipc.Interface = current.Int(0)
+			ipc.Interface = cni100.Int(0)
 		}
 
 		err = netns.Do(func(_ ns.NetNS) error {
@@ -415,13 +435,13 @@ func cmdCheck(args *skel.CmdArgs) error {
 		return err
 	}
 
-	result, err := current.NewResultFromResult(n.PrevResult)
+	result, err := cni100.NewResultFromResult(n.PrevResult)
 	if err != nil {
 		return err
 	}
 	klog.Info("cmdCheck: ", result)
 
-	var contMap current.Interface
+	var contMap cni100.Interface
 	// Find interfaces for names whe know, macvlan device name inside container
 	for _, intf := range result.Interfaces {
 		if args.IfName == intf.Name {
@@ -469,7 +489,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 	return nil
 }
 
-func validateCniContainerInterface(intf current.Interface, parentIndex int, modeExpected string) error {
+func validateCniContainerInterface(intf cni100.Interface, parentIndex int, modeExpected string) error {
 
 	var link netlink.Link
 	var err error

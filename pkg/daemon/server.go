@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"fmt"
@@ -7,6 +7,9 @@ import (
 
 	"github.com/emicklei/go-restful/v3"
 	"k8s.io/klog/v2"
+
+	"github.com/Ubbo-Sathla/cni-ovs/pkg/request"
+	"github.com/Ubbo-Sathla/cni-ovs/pkg/util"
 )
 
 const (
@@ -15,9 +18,8 @@ const (
 )
 
 // RunServer runs the cniserver
-func RunServer(config *Configuration, controller *Controller) {
-	nodeName = config.NodeName
-	csh := createCniServerHandler(config, controller)
+func RunServer(config *Configuration) {
+	csh := &cniServerHandler{}
 	server := http.Server{
 		Handler:           createHandler(csh),
 		ReadHeaderTimeout: 3 * time.Second,
@@ -62,10 +64,6 @@ func requestAndResponseLogger(request *restful.Request, response *restful.Respon
 	start := time.Now()
 	chain.ProcessFilter(request, response)
 	elapsed := float64((time.Since(start)) / time.Millisecond)
-	cniOperationHistogram.WithLabelValues(
-		nodeName,
-		getRequestURI(request),
-		fmt.Sprintf("%d", response.StatusCode())).Observe(elapsed / 1000)
 	klog.Infof(formatResponseLog(response, request, elapsed))
 }
 

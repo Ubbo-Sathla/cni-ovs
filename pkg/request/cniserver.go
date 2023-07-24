@@ -2,6 +2,7 @@ package request
 
 import (
 	"fmt"
+	current "github.com/containernetworking/cni/pkg/types/100"
 
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/parnurzeal/gorequest"
@@ -20,16 +21,17 @@ type Route struct {
 
 // CniRequest is the cniserver request format
 type CniRequest struct {
-	CniType      string    `json:"cni_type"`
-	PodName      string    `json:"pod_name"`
-	PodNamespace string    `json:"pod_namespace"`
-	ContainerID  string    `json:"container_id"`
-	NetNs        string    `json:"net_ns"`
-	IfName       string    `json:"if_name"`
-	Provider     string    `json:"provider"`
-	Routes       []Route   `json:"routes"`
-	DNS          types.DNS `json:"dns"`
-	VfDriver     string    `json:"vf_driver"`
+	CniType      string         `json:"cni_type"`
+	IpamResult   current.Result `json:"ipam_result"`
+	PodName      string         `json:"pod_name"`
+	PodNamespace string         `json:"pod_namespace"`
+	ContainerID  string         `json:"container_id"`
+	NetNs        string         `json:"net_ns"`
+	IfName       string         `json:"if_name"`
+	Provider     string         `json:"provider"`
+	Routes       []Route        `json:"routes"`
+	DNS          types.DNS      `json:"dns"`
+	VfDriver     string         `json:"vf_driver"`
 	// PciAddrs in case of using sriov
 	DeviceID string `json:"deviceID"`
 	// dpdk
