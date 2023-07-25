@@ -3,27 +3,28 @@ kind: DaemonSet
 metadata:
   annotations:
     kubernetes.io/description: |
-      This daemon set launches the ovs cni daemon.
-  name: kube-ovs
+      This daemon set launches the kube-ovs cni daemon.
+  generation: 1
+  name: kube-ovs-cni
   namespace: kube-system
-
 spec:
   revisionHistoryLimit: 10
   selector:
     matchLabels:
-      app: kube-ovs
+      app: kube-ovs-cni
   template:
     metadata:
       labels:
-        app: kube-ovs
+        app: kube-ovs-cni
         component: network
         type: infra
     spec:
       containers:
-          command:
-            - ["/kube-ovn/kube-ovs"]
-          image: kubeovn/kube-ovn:v1.11.5
+        - command:
+            - /kube-ovn/kube-ovs
+          image: harbor.boncloud.com/test/kube-ovn:v1.11.5
           imagePullPolicy: IfNotPresent
+          name: cni-server
           resources:
             limits:
               cpu: "1"
@@ -73,10 +74,11 @@ spec:
       initContainers:
         - command:
             - /usr/bin/cp
+          args:
             - -f
             - /kube-ovn/cni-ovs
             - /opt/cni/bin/
-          image: kubeovn/kube-ovn:v1.11.5
+          image: harbor.boncloud.com/test/kube-ovn:v1.11.5
           imagePullPolicy: IfNotPresent
           name: install-cni
           resources: {}

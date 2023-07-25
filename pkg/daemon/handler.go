@@ -21,7 +21,7 @@ func (csh cniServerHandler) handleAdd(req *restful.Request, resp *restful.Respon
 		}
 		return
 	}
-	klog.V(5).Infof("request body is %v", podRequest)
+	klog.Infof("request body is %v", podRequest)
 	response := &request.CniResponse{}
 
 	if err := resp.WriteHeaderAndEntity(http.StatusOK, response); err != nil {
