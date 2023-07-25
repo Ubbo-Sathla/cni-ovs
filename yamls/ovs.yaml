@@ -23,7 +23,7 @@ spec:
         - command:
             - /kube-ovn/kube-ovs
           image: harbor.boncloud.com/test/kube-ovn:v1.11.5
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           name: cni-server
           resources:
             limits:
@@ -79,7 +79,7 @@ spec:
             - /kube-ovn/cni-ovs
             - /opt/cni/bin/
           image: harbor.boncloud.com/test/kube-ovn:v1.11.5
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           name: install-cni
           resources: {}
           securityContext:
