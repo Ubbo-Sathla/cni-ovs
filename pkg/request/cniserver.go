@@ -31,9 +31,6 @@ type CniRequest struct {
 	Provider     string        `json:"provider"`
 	Routes       []Route       `json:"routes"`
 	DNS          types.DNS     `json:"dns"`
-	VfDriver     string        `json:"vf_driver"`
-	// PciAddrs in case of using sriov
-	DeviceID string `json:"deviceID"`
 	// dpdk
 	// empty dir volume for sharing vhost user unix socket
 	VhostUserSocketVolumeName string `json:"vhost_user_socket_volume_name"`
