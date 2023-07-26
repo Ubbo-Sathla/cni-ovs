@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/emicklei/go-restful/v3"
@@ -19,11 +20,12 @@ const (
 
 // RunServer runs the cniserver
 func RunServer(config *Configuration) {
-	csh := &cniServerHandler{}
+	csh := &cniServerHandler{Config: config}
 	server := http.Server{
 		Handler:           createHandler(csh),
 		ReadHeaderTimeout: 3 * time.Second,
 	}
+	os.Remove(config.BindSocket)
 	listener, cleanFunc, err := listen(config.BindSocket)
 	if err != nil {
 		util.LogFatalAndExit(err, "failed to listen on %s", config.BindSocket)
