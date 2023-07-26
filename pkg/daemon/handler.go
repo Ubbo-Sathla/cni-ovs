@@ -8,7 +8,16 @@ import (
 	"net/http"
 )
 
+const (
+	gatewayModeDisabled = iota
+	gatewayCheckModePing
+	gatewayCheckModeArping
+	gatewayCheckModePingNotConcerned
+	gatewayCheckModeArpingNotConcerned
+)
+
 type cniServerHandler struct {
+	Config *Configuration
 }
 
 func (csh cniServerHandler) handleAdd(req *restful.Request, resp *restful.Response) {
@@ -21,11 +30,22 @@ func (csh cniServerHandler) handleAdd(req *restful.Request, resp *restful.Respon
 		}
 		return
 	}
-	klog.Infof("request body is %v", podRequest)
+	klog.Infof("request body is %#v", podRequest)
 
+	// TODO: Add interface to ovs
+	var err error
+
+	//var macAddr, ip, ipAddr, cidr, gw, subnet, ingress, egress, providerNetwork, ifName, nicType, podNicName, vmName, latency, limit, loss, jitter, u2oInterconnectionIP string
+	//var mtu int
+	//
+	//mtu = csh.Config.MTU
+	//
+	//err = csh.configureNic(podRequest.PodName, podRequest.PodNamespace, podRequest.Provider, podRequest.NetNs, podRequest.ContainerID, podRequest.VfDriver, ifName, macAddr, mtu, ipAddr, gw, isDefaultRoute, detectIPConflict, routes, podRequest.DNS.Nameservers, podRequest.DNS.Search, ingress, egress, podRequest.DeviceID, nicType, latency, limit, loss, jitter, gatewayCheckMode, u2oInterconnectionIP)
+
+	// TODO: Return pod interface information
 	response := &request.CniResponse{}
 
-	if err := resp.WriteHeaderAndEntity(http.StatusOK, response); err != nil {
+	if err = resp.WriteHeaderAndEntity(http.StatusOK, response); err != nil {
 		klog.Errorf("failed to write response, %v", err)
 	}
 }

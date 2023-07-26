@@ -19,7 +19,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/Ubbo-Sathla/cni-ovs/pkg/apis"
 	"github.com/Ubbo-Sathla/cni-ovs/pkg/request"
+	"github.com/Ubbo-Sathla/cni-ovs/pkg/util"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	cni100 "github.com/containernetworking/cni/pkg/types/100"
@@ -28,11 +30,11 @@ import (
 	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/containernetworking/plugins/pkg/ns"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
-	"github.com/containernetworking/plugins/pkg/utils/sysctl"
 	"github.com/vishvananda/netlink"
 	"k8s.io/klog/v2"
 	"net"
 	"runtime"
+	"strings"
 )
 
 type NetConf struct {
@@ -65,7 +67,10 @@ func init() {
 	runtime.LockOSThread()
 
 }
-
+func main() {
+	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("macvlan"))
+	klog.Flush()
+}
 func getDefaultRouteInterfaceName() (string, error) {
 	routeToDstIP, err := netlink.RouteList(nil, netlink.FAMILY_ALL)
 	if err != nil {
@@ -165,194 +170,60 @@ func modeToString(mode netlink.MacvlanMode) (string, error) {
 	}
 }
 
-func createMacvlan(conf *NetConf, ifName string, netns ns.NetNS) (*cni100.Interface, error) {
-	macvlan := &cni100.Interface{}
-
-	mode, err := modeFromString(conf.Mode)
-	if err != nil {
-		return nil, err
-	}
-
-	m, err := netlink.LinkByName(conf.Master)
-	if err != nil {
-		return nil, fmt.Errorf("failed to lookup master %q: %v", conf.Master, err)
-	}
-
-	// due to kernel bug we have to create with tmpName or it might
-	// collide with the name on the host and error out
-	tmpName, err := ip.RandomVethName()
-	if err != nil {
-		return nil, err
-	}
-
-	linkAttrs := netlink.LinkAttrs{
-		MTU:         conf.MTU,
-		Name:        tmpName,
-		ParentIndex: m.Attrs().Index,
-		Namespace:   netlink.NsFd(int(netns.Fd())),
-	}
-
-	if conf.Mac != "" {
-		addr, err := net.ParseMAC(conf.Mac)
-		if err != nil {
-			return nil, fmt.Errorf("invalid args %v for MAC addr: %v", conf.Mac, err)
-		}
-		linkAttrs.HardwareAddr = addr
-	}
-
-	mv := &netlink.Macvlan{
-		LinkAttrs: linkAttrs,
-		Mode:      mode,
-	}
-
-	if err := netlink.LinkAdd(mv); err != nil {
-		return nil, fmt.Errorf("failed to create macvlan: %v", err)
-	}
-
-	err = netns.Do(func(_ ns.NetNS) error {
-		err := ip.RenameLink(tmpName, ifName)
-		if err != nil {
-			_ = netlink.LinkDel(mv)
-			return fmt.Errorf("failed to rename macvlan to %q: %v", ifName, err)
-		}
-		macvlan.Name = ifName
-
-		// Re-fetch macvlan to get all properties/attributes
-		contMacvlan, err := netlink.LinkByName(ifName)
-		if err != nil {
-			return fmt.Errorf("failed to refetch macvlan %q: %v", ifName, err)
-		}
-		macvlan.Mac = contMacvlan.Attrs().HardwareAddr.String()
-		macvlan.Sandbox = netns.Path()
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return macvlan, nil
-}
-
 func cmdAdd(args *skel.CmdArgs) error {
 	n, cniVersion, err := loadConf(args.StdinData, args.Args)
 	if err != nil {
 		return err
 	}
 	klog.Info("cmdAdd", n, cniVersion)
-	isLayer3 := n.IPAM.Type != ""
 
-	netns, err := ns.GetNS(args.Netns)
-	if err != nil {
-		return fmt.Errorf("failed to open netns %q: %v", netns, err)
-	}
-	defer netns.Close()
-
-	macvlanInterface, err := createMacvlan(n, args.IfName, netns)
+	// run the IPAM plugin and get back the config to apply
+	r, err := ipam.ExecAdd(n.IPAM.Type, args.StdinData)
 	if err != nil {
 		return err
 	}
-
-	// Delete link if err to avoid link leak in this ns
+	// Invoke ipam del if err to avoid ip leak
 	defer func() {
 		if err != nil {
-			netns.Do(func(_ ns.NetNS) error {
-				return ip.DelLinkByName(args.IfName)
-			})
+			ipam.ExecDel(n.IPAM.Type, args.StdinData)
 		}
 	}()
 
-	// Assume L2 interface only
-	result := &cni100.Result{
-		CNIVersion: cni100.ImplementedSpecVersion,
-		Interfaces: []*cni100.Interface{macvlanInterface},
+	// Convert whatever the IPAM result was into the current Result type
+	ipamResult, err := cni100.NewResultFromResult(r)
+	if err != nil {
+		return err
+	}
+	klog.Infof("cmdAdd: ipam result %#v", ipamResult)
+
+	if len(ipamResult.IPs) == 0 {
+		return errors.New("IPAM plugin returned missing IP config")
 	}
 
-	if isLayer3 {
-		// run the IPAM plugin and get back the config to apply
-		r, err := ipam.ExecAdd(n.IPAM.Type, args.StdinData)
-		if err != nil {
-			return err
-		}
-		// Invoke ipam del if err to avoid ip leak
-		defer func() {
-			if err != nil {
-				ipam.ExecDel(n.IPAM.Type, args.StdinData)
-			}
-		}()
-
-		// Convert whatever the IPAM result was into the current Result type
-		ipamResult, err := cni100.NewResultFromResult(r)
-		if err != nil {
-			return err
-		}
-
-		if len(ipamResult.IPs) == 0 {
-			return errors.New("IPAM plugin returned missing IP config")
-		}
-
-		result.IPs = ipamResult.IPs
-		result.Routes = ipamResult.Routes
-		klog.Info("cmdAdd: result ", result)
-		client := request.NewCniServerClient(n.ServerSocket)
-		_, err = client.Add(request.CniRequest{
-			CniType:                   n.Type,
-			IpamResult:                *ipamResult,
-			PodName:                   "",
-			PodNamespace:              "",
-			ContainerID:               args.ContainerID,
-			NetNs:                     args.Netns,
-			IfName:                    args.IfName,
-			Provider:                  "",
-			Routes:                    nil,
-			DNS:                       types.DNS{},
-			VfDriver:                  "",
-			DeviceID:                  "",
-			VhostUserSocketVolumeName: "",
-			VhostUserSocketName:       "",
-		})
-		if err != nil {
-			return types.NewError(types.ErrTryAgainLater, "RPC failed", err.Error())
-		}
-
-		for _, ipc := range result.IPs {
-			// All addresses apply to the container macvlan interface
-			ipc.Interface = cni100.Int(0)
-		}
-
-		err = netns.Do(func(_ ns.NetNS) error {
-			_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv4/conf/%s/arp_notify", args.IfName), "1")
-
-			if err := ipam.ConfigureIface(args.IfName, result); err != nil {
-				return err
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-	} else {
-		// For L2 just change interface status to up
-		err = netns.Do(func(_ ns.NetNS) error {
-			macvlanInterfaceLink, err := netlink.LinkByName(args.IfName)
-			if err != nil {
-				return fmt.Errorf("failed to find interface name %q: %v", macvlanInterface.Name, err)
-			}
-
-			if err := netlink.LinkSetUp(macvlanInterfaceLink); err != nil {
-				return fmt.Errorf("failed to set %q UP: %v", args.IfName, err)
-			}
-
-			return nil
-		})
-		if err != nil {
-			return err
-		}
+	client := request.NewCniServerClient(n.ServerSocket)
+	response, err := client.Add(request.CniRequest{
+		CniType:                   n.Type,
+		IpamResult:                *ipamResult,
+		PodName:                   "",
+		PodNamespace:              "",
+		ContainerID:               args.ContainerID,
+		NetNs:                     args.Netns,
+		IfName:                    args.IfName,
+		Provider:                  "",
+		Routes:                    nil,
+		DNS:                       types.DNS{},
+		VfDriver:                  "",
+		DeviceID:                  "",
+		VhostUserSocketVolumeName: "",
+		VhostUserSocketName:       "",
+	})
+	if err != nil {
+		return types.NewError(types.ErrTryAgainLater, "RPC failed", err.Error())
 	}
 
-	result.DNS = n.DNS
+	result := generateCNIResult(response, args.Netns)
 
-	return types.PrintResult(result, cniVersion)
+	return types.PrintResult(&result, cniVersion)
 }
 
 func cmdDel(args *skel.CmdArgs) error {
@@ -397,11 +268,6 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 
 	return err
-}
-
-func main() {
-	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("macvlan"))
-	klog.Flush()
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
@@ -530,4 +396,102 @@ func validateCniContainerInterface(intf cni100.Interface, parentIndex int, modeE
 	}
 
 	return nil
+}
+
+func generateCNIResult(cniResponse *request.CniResponse, netns string) cni100.Result {
+	result := cni100.Result{
+		CNIVersion: cni100.ImplementedSpecVersion,
+		DNS:        cniResponse.DNS,
+	}
+	_, mask, _ := net.ParseCIDR(cniResponse.CIDR)
+	podIface := cni100.Interface{
+		Name:    cniResponse.PodNicName,
+		Mac:     cniResponse.MacAddress,
+		Sandbox: netns,
+	}
+	switch cniResponse.Protocol {
+	case apis.ProtocolIPv4:
+		ip, route := assignV4Address(cniResponse.IpAddress, cniResponse.Gateway, mask)
+		result.IPs = []*cni100.IPConfig{ip}
+		if route != nil {
+			result.Routes = []*types.Route{route}
+		}
+		result.Interfaces = []*cni100.Interface{&podIface}
+	case apis.ProtocolIPv6:
+		ip, route := assignV6Address(cniResponse.IpAddress, cniResponse.Gateway, mask)
+		result.IPs = []*cni100.IPConfig{ip}
+		if route != nil {
+			result.Routes = []*types.Route{route}
+		}
+		result.Interfaces = []*cni100.Interface{&podIface}
+	case apis.ProtocolDual:
+		var netMask *net.IPNet
+		var gwStr string
+		for _, cidrBlock := range strings.Split(cniResponse.CIDR, ",") {
+			_, netMask, _ = net.ParseCIDR(cidrBlock)
+			gwStr = ""
+			if util.CheckProtocol(cidrBlock) == apis.ProtocolIPv4 {
+				ipStr := strings.Split(cniResponse.IpAddress, ",")[0]
+				if cniResponse.Gateway != "" {
+					gwStr = strings.Split(cniResponse.Gateway, ",")[0]
+				}
+
+				ip, route := assignV4Address(ipStr, gwStr, netMask)
+				result.IPs = append(result.IPs, ip)
+				if route != nil {
+					result.Routes = append(result.Routes, route)
+				}
+			} else if util.CheckProtocol(cidrBlock) == apis.ProtocolIPv6 {
+				ipStr := strings.Split(cniResponse.IpAddress, ",")[1]
+				if cniResponse.Gateway != "" {
+					gwStr = strings.Split(cniResponse.Gateway, ",")[1]
+				}
+
+				ip, route := assignV6Address(ipStr, gwStr, netMask)
+				result.IPs = append(result.IPs, ip)
+				if route != nil {
+					result.Routes = append(result.Routes, route)
+				}
+			}
+		}
+		result.Interfaces = []*cni100.Interface{&podIface}
+	}
+
+	return result
+}
+
+func assignV4Address(ipAddress, gateway string, mask *net.IPNet) (*cni100.IPConfig, *types.Route) {
+	ip := &cni100.IPConfig{
+		Address:   net.IPNet{IP: net.ParseIP(ipAddress).To4(), Mask: mask.Mask},
+		Gateway:   net.ParseIP(gateway).To4(),
+		Interface: cni100.Int(0),
+	}
+
+	var route *types.Route
+	if gw := net.ParseIP(gateway); gw != nil {
+		route = &types.Route{
+			Dst: net.IPNet{IP: net.IPv4zero.To4(), Mask: net.CIDRMask(0, 32)},
+			GW:  net.ParseIP(gateway).To4(),
+		}
+	}
+
+	return ip, route
+}
+
+func assignV6Address(ipAddress, gateway string, mask *net.IPNet) (*cni100.IPConfig, *types.Route) {
+	ip := &cni100.IPConfig{
+		Address:   net.IPNet{IP: net.ParseIP(ipAddress).To16(), Mask: mask.Mask},
+		Gateway:   net.ParseIP(gateway).To16(),
+		Interface: cni100.Int(0),
+	}
+
+	var route *types.Route
+	if gw := net.ParseIP(gateway); gw != nil {
+		route = &types.Route{
+			Dst: net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
+			GW:  net.ParseIP(gateway).To16(),
+		}
+	}
+
+	return ip, route
 }

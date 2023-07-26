@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"fmt"
+	"github.com/Ubbo-Sathla/cni-ovs/pkg/apis"
 	"github.com/Ubbo-Sathla/cni-ovs/pkg/ovs"
 	"github.com/Ubbo-Sathla/cni-ovs/pkg/request"
 	"github.com/Ubbo-Sathla/cni-ovs/pkg/util"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/utils/sysctl"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
 	"net"
 	"os/exec"
@@ -93,7 +95,7 @@ func configureContainerNic(nicName, ifName string, ipAddr, gateway string, isDef
 			}
 		}
 
-		if util.CheckProtocol(ipAddr) == kubeovnv1.ProtocolDual || util.CheckProtocol(ipAddr) == kubeovnv1.ProtocolIPv6 {
+		if util.CheckProtocol(ipAddr) == apis.ProtocolDual || util.CheckProtocol(ipAddr) == apis.ProtocolIPv6 {
 			// For docker version >=17.x the "none" network will disable ipv6 by default.
 			// We have to enable ipv6 here to add v6 address and gateway.
 			// See https://github.com/containernetworking/cni/issues/531
@@ -189,6 +191,201 @@ func configureContainerNic(nicName, ifName string, ipAddr, gateway string, isDef
 
 		return nil
 	})
+}
+
+func checkGatewayReady(gwCheckMode int, intr, ipAddr, gateway string, underlayGateway, verbose bool) error {
+	var err error
+
+	if gwCheckMode == gatewayCheckModeArpingNotConcerned || gwCheckMode == gatewayCheckModePingNotConcerned {
+		// ignore error if disableGatewayCheck=true
+		if err = waitNetworkReady(intr, ipAddr, gateway, underlayGateway, verbose, 1); err != nil {
+			err = nil
+		}
+	} else {
+		err = waitNetworkReady(intr, ipAddr, gateway, underlayGateway, verbose, gatewayCheckMaxRetry)
+	}
+	return err
+}
+func waitNetworkReady(nic, ipAddr, gateway string, underlayGateway, verbose bool, maxRetry int) error {
+	ips := strings.Split(ipAddr, ",")
+	for i, gw := range strings.Split(gateway, ",") {
+		src := strings.Split(ips[i], "/")[0]
+		if underlayGateway && util.CheckProtocol(gw) == apis.ProtocolIPv4 {
+			mac, count, err := util.ArpResolve(nic, src, gw, time.Second, maxRetry)
+			if err != nil {
+				err = fmt.Errorf("network %s with gateway %s is not ready for interface %s after %d checks: %v", ips[i], gw, nic, count, err)
+				klog.Warning(err)
+				return err
+			}
+			if verbose {
+				klog.Infof("MAC addresses of gateway %s is %s", gw, mac.String())
+				klog.Infof("network %s with gateway %s is ready for interface %s after %d checks", ips[i], gw, nic, count)
+			}
+			maxRetry -= count
+		} else {
+			count, err := pingGateway(gw, src, verbose, maxRetry)
+			if err != nil {
+				return err
+			}
+			maxRetry -= count
+		}
+	}
+	return nil
+}
+
+func configureNic(link, ip string, macAddr net.HardwareAddr, mtu int, detectIPConflict bool) error {
+	nodeLink, err := netlink.LinkByName(link)
+	if err != nil {
+		return fmt.Errorf("can not find nic %s: %v", link, err)
+	}
+
+	if err = netlink.LinkSetHardwareAddr(nodeLink, macAddr); err != nil {
+		return fmt.Errorf("can not set mac address to nic %s: %v", link, err)
+	}
+
+	if mtu > 0 {
+		if nodeLink.Type() == "openvswitch" {
+			_, err = ovs.Exec("set", "interface", link, fmt.Sprintf(`mtu_request=%d`, mtu))
+		} else {
+			err = netlink.LinkSetMTU(nodeLink, mtu)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to set nic %s mtu: %v", link, err)
+		}
+	}
+
+	if nodeLink.Attrs().OperState != netlink.OperUp {
+		if err = netlink.LinkSetUp(nodeLink); err != nil {
+			return fmt.Errorf("can not set node nic %s up: %v", link, err)
+		}
+	}
+
+	ipDelMap := make(map[string]netlink.Addr)
+	ipAddMap := make(map[string]netlink.Addr)
+	ipAddrs, err := netlink.AddrList(nodeLink, unix.AF_UNSPEC)
+	if err != nil {
+		return fmt.Errorf("can not get addr %s: %v", nodeLink, err)
+	}
+	for _, ipAddr := range ipAddrs {
+		if ipAddr.IP.IsLinkLocalUnicast() {
+			// skip 169.254.0.0/16 and fe80::/10
+			continue
+		}
+		ipDelMap[ipAddr.IPNet.String()] = ipAddr
+	}
+
+	for _, ipStr := range strings.Split(ip, ",") {
+		// Do not reassign same address for link
+		if _, ok := ipDelMap[ipStr]; ok {
+			delete(ipDelMap, ipStr)
+			continue
+		}
+
+		ipAddr, err := netlink.ParseAddr(ipStr)
+		if err != nil {
+			return fmt.Errorf("can not parse address %s: %v", ipStr, err)
+		}
+		ipAddMap[ipStr] = *ipAddr
+	}
+
+	for ip, addr := range ipDelMap {
+		klog.Infof("delete ip address %s on %s", ip, link)
+		if err = netlink.AddrDel(nodeLink, &addr); err != nil {
+			return fmt.Errorf("delete address %s: %v", addr, err)
+		}
+	}
+	for ip, addr := range ipAddMap {
+		if detectIPConflict && addr.IP.To4() != nil {
+			ip := addr.IP.String()
+			mac, err := util.ArpDetectIPConflict(link, ip, macAddr)
+			if err != nil {
+				err = fmt.Errorf("failed to detect address conflict for %s on link %s: %v", ip, link, err)
+				klog.Error(err)
+				return err
+			}
+			if mac != nil {
+				return fmt.Errorf("IP address %s has already been used by host with MAC %s", ip, mac)
+			}
+		}
+		if addr.IP.To4() != nil && !detectIPConflict {
+			// when detectIPConflict is true, free arp is already broadcast in the step of announcement
+			if err := util.AnnounceArpAddress(link, addr.IP.String(), macAddr, 1, 1*time.Second); err != nil {
+				klog.Warningf("failed to broadcast free arp with err %v ", err)
+			}
+		}
+
+		klog.Infof("add ip address %s to %s", ip, link)
+		if err = netlink.AddrAdd(nodeLink, &addr); err != nil {
+			return fmt.Errorf("can not add address %v to nic %s: %v", addr, link, err)
+		}
+	}
+
+	return nil
+}
+
+func addAdditionalNic(ifName string) error {
+	dummy := &netlink.Dummy{
+		LinkAttrs: netlink.LinkAttrs{
+			Name: ifName,
+		},
+	}
+
+	if err := netlink.LinkAdd(dummy); err != nil {
+		if err := netlink.LinkDel(dummy); err != nil {
+			klog.Errorf("failed to delete static iface %v, err %v", ifName, err)
+			return err
+		}
+		return fmt.Errorf("failed to create static iface %v, err %v", ifName, err)
+	}
+	return nil
+}
+
+func configureAdditionalNic(link, ip string) error {
+	nodeLink, err := netlink.LinkByName(link)
+	if err != nil {
+		return fmt.Errorf("can not find nic %s %v", link, err)
+	}
+
+	ipDelMap := make(map[string]netlink.Addr)
+	ipAddMap := make(map[string]netlink.Addr)
+	ipAddrs, err := netlink.AddrList(nodeLink, 0x0)
+	if err != nil {
+		return fmt.Errorf("can not get addr %s %v", nodeLink, err)
+	}
+	for _, ipAddr := range ipAddrs {
+		if ipAddr.IP.IsLinkLocalUnicast() {
+			// skip 169.254.0.0/16 and fe80::/10
+			continue
+		}
+		ipDelMap[ipAddr.IPNet.String()] = ipAddr
+	}
+
+	for _, ipStr := range strings.Split(ip, ",") {
+		// Do not reassign same address for link
+		if _, ok := ipDelMap[ipStr]; ok {
+			delete(ipDelMap, ipStr)
+			continue
+		}
+
+		ipAddr, err := netlink.ParseAddr(ipStr)
+		if err != nil {
+			return fmt.Errorf("can not parse %s %v", ipStr, err)
+		}
+		ipAddMap[ipStr] = *ipAddr
+	}
+
+	for _, addr := range ipDelMap {
+		if err = netlink.AddrDel(nodeLink, &addr); err != nil {
+			return fmt.Errorf("delete address %s %v", addr, err)
+		}
+	}
+	for _, addr := range ipAddMap {
+		if err = netlink.AddrAdd(nodeLink, &addr); err != nil {
+			return fmt.Errorf("can not add address %v to nic %s, %v", addr, link, err)
+		}
+	}
+
+	return nil
 }
 
 func setupVethPair(containerID, ifName string, mtu int) (string, string, error) {
