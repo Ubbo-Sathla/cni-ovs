@@ -32,22 +32,37 @@ func (csh cniServerHandler) handleAdd(req *restful.Request, resp *restful.Respon
 	}
 	klog.Infof("request body is %#v", podRequest)
 	// TODO: Add interface to ovs
-
-	macAddr := podRequest.IpamResult.Interfaces[0].Mac
+	var macAddr, ipAddr, gw, nicType, u2oInterconnectionIP string
+	var routes []request.Route
+	var err error
+	var isDefaultRoute, detectIPConflict bool
+	var gatewayCheckMode, mtu int
+	gatewayCheckMode = 0
+	isDefaultRoute = false
+	detectIPConflict = true
+	nicType = "veth-pair"
+	macAddr = podRequest.IpamResult.Interfaces[0].Mac
 	klog.Info("mac: ", macAddr)
 
-	ipAddr := podRequest.IpamResult.IPs[0].Address.String()
+	ipAddr = podRequest.IpamResult.IPs[0].Address.String()
 	klog.Info("ip: ", ipAddr)
 
-	mtu := csh.Config.MTU
+	mtu = csh.Config.MTU
 	klog.Info("mtu: ", mtu)
 
-	//err := csh.configureNic(podRequest.PodName, podRequest.PodNamespace, podRequest.Provider, podRequest.NetNs, podRequest.ContainerID, podRequest.IfName, macAddr, mtu, ipAddr, gw, isDefaultRoute, detectIPConflict, routes, nicType, gatewayCheckMode, u2oInterconnectionIP)
-
+	err = csh.configureNic(podRequest.PodName, podRequest.PodNamespace, podRequest.Provider, podRequest.NetNs, podRequest.ContainerID, podRequest.IfName, macAddr, mtu, ipAddr, gw, isDefaultRoute, detectIPConflict, routes, nicType, gatewayCheckMode, u2oInterconnectionIP)
+	if err != nil {
+		errMsg := fmt.Errorf("configure nic failed %v", err)
+		klog.Error(errMsg)
+		if err := resp.WriteHeaderAndEntity(http.StatusInternalServerError, request.CniResponse{Err: errMsg.Error()}); err != nil {
+			klog.Errorf("failed to write response, %v", err)
+		}
+		return
+	}
 	// TODO: Return pod interface information
 	response := &request.CniResponse{}
 
-	if err := resp.WriteHeaderAndEntity(http.StatusOK, response); err != nil {
+	if err = resp.WriteHeaderAndEntity(http.StatusOK, response); err != nil {
 		klog.Errorf("failed to write response, %v", err)
 	}
 }
